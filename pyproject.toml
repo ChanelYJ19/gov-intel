@@ -1,0 +1,24 @@
+[project]
+name = "federal-intel-graph"
+version = "0.1.0"
+description = "Federal & regulatory intelligence graph — entity resolution over public funding and regulatory records"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.2",
+    "python-dotenv>=1.0",
+    "rapidfuzz>=3.9",
+]
+
+[project.scripts]
+init-db = "federal_intel.cli.init_db:main"
+load-sbir = "federal_intel.cli.load_sbir:main"
+resolve-sbir = "federal_intel.cli.resolve_sbir:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "federal_intel"
+module-root = "src"
