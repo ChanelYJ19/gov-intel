@@ -11,6 +11,9 @@ dist/
 # Data downloads
 data/
 
+# Agent scratch
+agent-tools/
+
 # IDE
 .idea/
 .vscode/
