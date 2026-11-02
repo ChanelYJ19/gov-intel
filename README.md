@@ -80,13 +80,14 @@ Do **not** use the web export (10,000 record cap) or the intermittently-down API
 Run weekly against the seeded test set (`fixtures/coverage_test_set.csv` — 20 companies):
 
 ```bash
-uv run coverage_test.py
+uv run coverage-test
+# or: uv run coverage_test.py
 ```
 
 Custom CSV (columns: `name`, optional `domain`, optional `notes`):
 
 ```bash
-uv run coverage_test.py --csv path/to/companies.csv
+uv run coverage-test --csv path/to/companies.csv
 ```
 
 Reports per company: resolved or not, match confidence and rule, counts of awards/patents/regulatory events, and canonical name. Domain column uses `company_identifier` when present. v1 target: **17/20 resolved**.

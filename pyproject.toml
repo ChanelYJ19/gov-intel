@@ -14,6 +14,7 @@ dependencies = [
 init-db = "federal_intel.cli.init_db:main"
 load-sbir = "federal_intel.cli.load_sbir:main"
 resolve-sbir = "federal_intel.cli.resolve_sbir:main"
+coverage-test = "federal_intel.cli.coverage_test:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]
