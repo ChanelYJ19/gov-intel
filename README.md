@@ -17,6 +17,16 @@ Entity-resolution graph joining public federal funding, contract, IP, and regula
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - PostgreSQL 16 with `pg_trgm` extension
 
+## GitHub sync
+
+If your GitHub clone is missing files (e.g. `coverage_test.py`), pull latest `main` from Cursor Origin and push to GitHub:
+
+```bash
+origin auth login
+./scripts/sync_github.sh
+uv sync
+```
+
 ## Setup
 
 ```bash
