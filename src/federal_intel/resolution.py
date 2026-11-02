@@ -26,6 +26,14 @@ class ResolutionResult:
     is_new: bool
 
 
+@dataclass(frozen=True)
+class LookupResult:
+    company_id: int
+    canonical_name: str
+    confidence: float
+    rule: str
+
+
 class CompanyResolver:
     """Resolve company names against existing aliases with tiered matching."""
 
@@ -234,6 +242,42 @@ class CompanyResolver:
 
         company_id = self._create_company(name, source, source_key)
         return ResolutionResult(company_id, EXACT_CONFIDENCE, "new_company", is_new=True)
+
+    def lookup(self, raw_name: str) -> LookupResult | None:
+        """Read-only resolution for coverage queries; never creates companies."""
+        name = raw_name.strip()
+        if not name:
+            return None
+
+        exact_key = name.lower()
+        if exact_key in self._exact:
+            company_id = self._exact[exact_key]
+            return self._lookup_meta(company_id, EXACT_CONFIDENCE, "exact_name")
+
+        normalized = normalize_company_name(name)
+        if normalized in self._normalized:
+            company_id = self._normalized[normalized]
+            return self._lookup_meta(company_id, NORMALIZED_CONFIDENCE, "normalized_name")
+
+        candidates = self._fuzzy_candidates(normalized)
+        if candidates:
+            best_id, best_alias, _best_canonical = candidates[0]
+            best_score = fuzz.token_sort_ratio(
+                normalized, normalize_company_name(best_alias)
+            )
+            if best_score >= FUZZY_THRESHOLD:
+                confidence = round(best_score / 100.0, 3)
+                return self._lookup_meta(best_id, confidence, "fuzzy_name")
+
+        return None
+
+    def _lookup_meta(self, company_id: int, confidence: float, rule: str) -> LookupResult:
+        row = self.conn.execute(
+            "SELECT canonical_name FROM company WHERE id = %s",
+            (company_id,),
+        ).fetchone()
+        assert row is not None
+        return LookupResult(company_id, row[0], confidence, rule)
 
 
 def award_kind_from_program(program: str | None) -> str:
