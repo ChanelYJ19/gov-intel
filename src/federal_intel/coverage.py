@@ -8,6 +8,7 @@ from pathlib import Path
 
 import psycopg
 
+from federal_intel.loaders.sbir import SBIR_SOURCE
 from federal_intel.resolution import CompanyResolver
 
 DEFAULT_TEST_SET = Path(__file__).resolve().parents[2] / "fixtures" / "coverage_test_set.csv"
@@ -26,10 +27,20 @@ class CompanyCoverage:
     awards: int
     patents: int
     regulatory_events: int
+    sbir_corpus_rows: int
+    sbir_name_hint: str | None
 
     @property
     def has_federal_signal(self) -> bool:
         return self.awards + self.patents + self.regulatory_events > 0
+
+    @property
+    def diagnosis(self) -> str:
+        if self.resolved:
+            return "ok"
+        if self.sbir_corpus_rows == 0:
+            return "absent_from_sbir"
+        return "in_sbir_unresolved"
 
 
 def _normalize_domain(raw: str | None) -> str | None:
@@ -76,6 +87,40 @@ def _edge_counts(conn: psycopg.Connection, company_id: int) -> tuple[int, int, i
     return int(awards), int(patents), int(events)
 
 
+def _sbir_corpus_stats(
+    conn: psycopg.Connection,
+    *,
+    name: str,
+    domain: str | None,
+) -> tuple[int, str | None]:
+    """Count SBIR rows matching company name or website; return top name hint."""
+    normalized_domain = _normalize_domain(domain)
+    params: list = [SBIR_SOURCE, f"%{name}%"]
+    sql = f"""
+        SELECT COUNT(*) FROM source_record
+        WHERE source = %s AND (
+            raw->>'Company' ILIKE %s
+            {" OR raw->>'Company Website' ILIKE %s" if normalized_domain else ""}
+        )
+    """
+    count_row = conn.execute(sql, tuple(params)).fetchone()
+    count = int(count_row[0]) if count_row else 0
+
+    hint_row = conn.execute(
+        """
+        SELECT raw->>'Company' AS company, COUNT(*) AS n
+        FROM source_record
+        WHERE source = %s AND raw->>'Company' ILIKE %s
+        GROUP BY 1
+        ORDER BY n DESC
+        LIMIT 1
+        """,
+        (SBIR_SOURCE, f"%{name}%"),
+    ).fetchone()
+    hint = hint_row[0] if hint_row else None
+    return count, hint
+
+
 def load_test_set(path: Path) -> list[dict[str, str | None]]:
     rows: list[dict[str, str | None]] = []
     with path.open(newline="", encoding="utf-8") as handle:
@@ -99,6 +144,8 @@ def evaluate_company(
     domain: str | None,
     notes: str | None,
 ) -> CompanyCoverage:
+    sbir_rows, sbir_hint = _sbir_corpus_stats(conn, name=name, domain=domain)
+
     company_id: int | None = None
     canonical: str | None = None
     confidence: float | None = None
@@ -132,6 +179,8 @@ def evaluate_company(
             awards=0,
             patents=0,
             regulatory_events=0,
+            sbir_corpus_rows=sbir_rows,
+            sbir_name_hint=sbir_hint,
         )
 
     awards, patents, events = _edge_counts(conn, company_id)
@@ -147,6 +196,8 @@ def evaluate_company(
         awards=awards,
         patents=patents,
         regulatory_events=events,
+        sbir_corpus_rows=sbir_rows,
+        sbir_name_hint=sbir_hint,
     )
 
 
@@ -172,45 +223,56 @@ def run_coverage(test_set_path: Path = DEFAULT_TEST_SET) -> list[CompanyCoverage
 def format_scoreboard(results: list[CompanyCoverage]) -> str:
     resolved = sum(1 for r in results if r.resolved)
     with_signal = sum(1 for r in results if r.has_federal_signal)
+    absent = sum(1 for r in results if r.diagnosis == "absent_from_sbir")
+    unresolved_in_sbir = sum(1 for r in results if r.diagnosis == "in_sbir_unresolved")
     total = len(results)
 
     lines: list[str] = []
-    lines.append("=" * 100)
-    lines.append("COVERAGE TEST SCOREBOARD")
-    lines.append("=" * 100)
+    lines.append("=" * 110)
+    lines.append("COVERAGE TEST SCOREBOARD (Phase 1: SBIR/STTR only)")
+    lines.append("=" * 110)
     header = (
-        f"{'Query Name':<22} {'Resolved':<9} {'Confidence':<11} {'Rule':<16} "
-        f"{'Awards':<7} {'Patents':<8} {'Reg':<5} Canonical / Match"
+        f"{'Query Name':<20} {'Resolved':<9} {'Conf':<6} {'Rule':<18} "
+        f"{'Awd':<5} {'SBIR':<5} {'Diag':<18} Match / hint"
     )
     lines.append(header)
-    lines.append("-" * 100)
+    lines.append("-" * 110)
 
     for row in results:
-        conf = f"{row.confidence:.3f}" if row.confidence is not None else "-"
-        rule = row.rule or "-"
-        canonical = row.canonical_name or "-"
-        if row.resolved and canonical != row.query_name:
-            canonical = f"{canonical} (≠ query)"
+        conf = f"{row.confidence:.2f}" if row.confidence is not None else "-"
+        rule = (row.rule or "-")[:17]
+        if row.resolved:
+            match = row.canonical_name or "-"
+            if match != row.query_name:
+                match = f"{match} (≠ query)"
+        elif row.sbir_name_hint and row.sbir_corpus_rows > 0:
+            match = f"SBIR name: {row.sbir_name_hint[:40]}"
+        else:
+            match = "no SBIR row for name/domain"
+
         lines.append(
-            f"{row.query_name:<22} "
+            f"{row.query_name:<20} "
             f"{'yes' if row.resolved else 'NO':<9} "
-            f"{conf:<11} "
-            f"{rule:<16} "
-            f"{row.awards:<7} "
-            f"{row.patents:<8} "
-            f"{row.regulatory_events:<5} "
-            f"{canonical}"
+            f"{conf:<6} "
+            f"{rule:<18} "
+            f"{row.awards:<5} "
+            f"{row.sbir_corpus_rows:<5} "
+            f"{row.diagnosis:<18} "
+            f"{match}"
         )
 
-    lines.append("-" * 100)
+    lines.append("-" * 110)
     lines.append(
-        f"Summary: {resolved}/{total} resolved | "
-        f"{with_signal}/{total} with federal signal (awards/patents/regulatory) | "
-        f"v1 target: 17/20 resolved"
+        f"Summary: {resolved}/{total} resolved | {with_signal}/{total} with ≥1 award | "
+        f"{absent}/{total} absent from SBIR corpus | {unresolved_in_sbir}/{total} in SBIR but not linked"
     )
     lines.append(
-        f"Pass resolved: {'YES' if resolved >= 17 else 'NO'} | "
-        f"Pass signal (Phase 1 SBIR only): {with_signal}/{total} with ≥1 award"
+        "Note: 17/20 resolved is a multi-source v1 target. On SBIR-only data, portfolio companies "
+        "with no SBIR awards will stay unresolved until Phase 2 (USASpending) or other sources."
     )
-    lines.append("=" * 100)
+    lines.append(
+        f"Pass resolved (SBIR-only realistic): {'YES' if resolved >= 10 else 'NO'} at {resolved}/20 | "
+        f"Full v1 target: {'YES' if resolved >= 17 else 'NO'}"
+    )
+    lines.append("=" * 110)
     return "\n".join(lines)
