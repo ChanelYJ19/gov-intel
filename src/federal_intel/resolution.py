@@ -162,15 +162,24 @@ class CompanyResolver:
         """Return (company_id, alias_name, canonical_name) candidates via pg_trgm."""
         rows = self.conn.execute(
             """
-            SELECT DISTINCT ON (ca.company_id)
-                ca.company_id,
-                ca.name,
-                c.canonical_name,
-                similarity(ca.name_normalized, %(q)s) AS sim
-            FROM company_alias ca
-            JOIN company c ON c.id = ca.company_id
-            WHERE ca.name_normalized %% %(q)s
-            ORDER BY ca.company_id, sim DESC
+            WITH ranked_aliases AS (
+                SELECT
+                    ca.company_id,
+                    ca.name,
+                    c.canonical_name,
+                    similarity(ca.name_normalized, %(q)s) AS sim,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ca.company_id
+                        ORDER BY similarity(ca.name_normalized, %(q)s) DESC, ca.id
+                    ) AS alias_rank
+                FROM company_alias ca
+                JOIN company c ON c.id = ca.company_id
+                WHERE ca.name_normalized %% %(q)s
+            )
+            SELECT company_id, name, canonical_name, sim
+            FROM ranked_aliases
+            WHERE alias_rank = 1
+            ORDER BY sim DESC, company_id
             LIMIT 10
             """,
             {"q": normalized},
