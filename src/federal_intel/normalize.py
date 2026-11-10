@@ -4,36 +4,38 @@ from __future__ import annotations
 
 import re
 
-_SUFFIXES = (
-    r"\bincorporated\b",
-    r"\binc\.?\b",
-    r"\bllc\.?\b",
-    r"\bl\.?l\.?c\.?\b",
-    r"\bcorp\.?\b",
-    r"\bcorporation\b",
-    r"\bco\.?\b",
-    r"\bcompany\b",
-    r"\bltd\.?\b",
-    r"\blimited\b",
-    r"\bplc\.?\b",
-    r"\blp\.?\b",
-    r"\bllp\.?\b",
-    r"\bpllc\.?\b",
-    r"\bpc\.?\b",
-    r"\bpa\.?\b",
+_LEGAL_SUFFIXES = (
+    "incorporated",
+    "corporation",
+    "limited",
+    "company",
+    "l l c",
+    "pllc",
+    "llp",
+    "llc",
+    "ltd",
+    "corp",
+    "inc",
+    "co",
+    "plc",
+    "lp",
+    "pc",
+    "pa",
 )
-
-_SUFFIX_PATTERN = re.compile("|".join(_SUFFIXES), re.IGNORECASE)
+_SUFFIX_PATTERN = re.compile(
+    r"(?:^|\s)(?:" + "|".join(re.escape(suffix) for suffix in _LEGAL_SUFFIXES) + r")$"
+)
 _NON_ALNUM = re.compile(r"[^a-z0-9\s]")
 _MULTI_SPACE = re.compile(r"\s+")
 
 
 def normalize_company_name(name: str) -> str:
-    """Lowercase, strip legal suffixes and punctuation, collapse whitespace."""
+    """Lowercase, strip trailing legal suffixes and punctuation."""
     cleaned = name.strip().lower()
     cleaned = _NON_ALNUM.sub(" ", cleaned)
-    cleaned = _SUFFIX_PATTERN.sub(" ", cleaned)
     cleaned = _MULTI_SPACE.sub(" ", cleaned).strip()
+    while match := _SUFFIX_PATTERN.search(cleaned):
+        cleaned = cleaned[: match.start()].strip()
     return cleaned
 
 

@@ -34,13 +34,25 @@ class LookupResult:
     rule: str
 
 
+class AmbiguousCompanyNameError(ValueError):
+    """Raised when a name key points to more than one canonical company."""
+
+    def __init__(self, name: str, rule: str, company_ids: set[int]) -> None:
+        ids = sorted(company_ids)
+        self.company_ids = tuple(ids)
+        super().__init__(
+            f"ambiguous {rule} for {name!r}; candidate company IDs: "
+            + ", ".join(str(company_id) for company_id in ids)
+        )
+
+
 class CompanyResolver:
     """Resolve company names against existing aliases with tiered matching."""
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self.conn = conn
-        self._exact: dict[str, int] = {}
-        self._normalized: dict[str, int] = {}
+        self._exact: dict[str, set[int]] = {}
+        self._normalized: dict[str, set[int]] = {}
         self._load_cache()
         self._ensure_fuzzy_index()
 
@@ -55,16 +67,15 @@ class CompanyResolver:
     def _load_cache(self) -> None:
         rows = self.conn.execute(
             """
-            SELECT company_id, name, name_normalized
+            SELECT company_id, name
             FROM company_alias
             """
         ).fetchall()
-        for company_id, name, name_normalized in rows:
+        for company_id, name in rows:
             key_exact = name.strip().lower()
-            if key_exact not in self._exact:
-                self._exact[key_exact] = company_id
-            if name_normalized not in self._normalized:
-                self._normalized[name_normalized] = company_id
+            normalized = normalize_company_name(name)
+            self._exact.setdefault(key_exact, set()).add(company_id)
+            self._normalized.setdefault(normalized, set()).add(company_id)
 
     def _log_resolution(
         self,
@@ -120,8 +131,8 @@ class CompanyResolver:
             """,
             (company_id, canonical, normalized, source, EXACT_CONFIDENCE, "new_company"),
         )
-        self._exact[canonical.lower()] = company_id
-        self._normalized[normalized] = company_id
+        self._exact.setdefault(canonical.lower(), set()).add(company_id)
+        self._normalized.setdefault(normalized, set()).add(company_id)
 
         self._log_resolution(
             source=source,
@@ -153,10 +164,8 @@ class CompanyResolver:
             (company_id, raw_name.strip(), normalized, source, confidence, rule),
         )
         key_exact = raw_name.strip().lower()
-        if key_exact not in self._exact:
-            self._exact[key_exact] = company_id
-        if normalized not in self._normalized:
-            self._normalized[normalized] = company_id
+        self._exact.setdefault(key_exact, set()).add(company_id)
+        self._normalized.setdefault(normalized, set()).add(company_id)
 
     def _fuzzy_candidates(self, normalized: str) -> list[tuple[int, str, str]]:
         """Return (company_id, alias_name, canonical_name) candidates via pg_trgm."""
@@ -167,14 +176,21 @@ class CompanyResolver:
                     ca.company_id,
                     ca.name,
                     c.canonical_name,
-                    similarity(ca.name_normalized, %(q)s) AS sim,
+                    GREATEST(
+                        similarity(ca.name_normalized, %(q)s),
+                        similarity(ca.name, %(q)s)
+                    ) AS sim,
                     ROW_NUMBER() OVER (
                         PARTITION BY ca.company_id
-                        ORDER BY similarity(ca.name_normalized, %(q)s) DESC, ca.id
+                        ORDER BY GREATEST(
+                            similarity(ca.name_normalized, %(q)s),
+                            similarity(ca.name, %(q)s)
+                        ) DESC, ca.id
                     ) AS alias_rank
                 FROM company_alias ca
                 JOIN company c ON c.id = ca.company_id
                 WHERE ca.name_normalized %% %(q)s
+                   OR ca.name %% %(q)s
             )
             SELECT company_id, name, canonical_name, sim
             FROM ranked_aliases
@@ -197,14 +213,20 @@ class CompanyResolver:
             raise ValueError("Cannot resolve empty company name")
 
         exact_key = name.lower()
-        if exact_key in self._exact:
-            company_id = self._exact[exact_key]
+        exact_ids = self._exact.get(exact_key, set())
+        if len(exact_ids) > 1:
+            raise AmbiguousCompanyNameError(name, "exact name", exact_ids)
+        if exact_ids:
+            company_id = next(iter(exact_ids))
             self._add_alias(company_id, name, source, EXACT_CONFIDENCE, "exact_name")
             return ResolutionResult(company_id, EXACT_CONFIDENCE, "exact_name", is_new=False)
 
         normalized = normalize_company_name(name)
-        if normalized in self._normalized:
-            company_id = self._normalized[normalized]
+        normalized_ids = self._normalized.get(normalized, set())
+        if len(normalized_ids) > 1:
+            raise AmbiguousCompanyNameError(name, "normalized name", normalized_ids)
+        if normalized_ids:
+            company_id = next(iter(normalized_ids))
             self._add_alias(company_id, name, source, NORMALIZED_CONFIDENCE, "normalized_name")
             return ResolutionResult(
                 company_id, NORMALIZED_CONFIDENCE, "normalized_name", is_new=False
@@ -259,14 +281,20 @@ class CompanyResolver:
             return None
 
         exact_key = name.lower()
-        if exact_key in self._exact:
-            company_id = self._exact[exact_key]
-            return self._lookup_meta(company_id, EXACT_CONFIDENCE, "exact_name")
+        exact_ids = self._exact.get(exact_key, set())
+        if len(exact_ids) > 1:
+            return None
+        if exact_ids:
+            return self._lookup_meta(next(iter(exact_ids)), EXACT_CONFIDENCE, "exact_name")
 
         normalized = normalize_company_name(name)
-        if normalized in self._normalized:
-            company_id = self._normalized[normalized]
-            return self._lookup_meta(company_id, NORMALIZED_CONFIDENCE, "normalized_name")
+        normalized_ids = self._normalized.get(normalized, set())
+        if len(normalized_ids) > 1:
+            return None
+        if normalized_ids:
+            return self._lookup_meta(
+                next(iter(normalized_ids)), NORMALIZED_CONFIDENCE, "normalized_name"
+            )
 
         candidates = self._fuzzy_candidates(normalized)
         if candidates:
